@@ -106,16 +106,16 @@ func accessPackageResourceCreate(ctx context.Context, d *pluginsdk.ResourceData,
 		CatalogId:            nullable.Value(pointer.From(catalog.Id)),
 	}
 
-	resp, err := client.CreateEntitlementManagementAccessPackage(ctx, properties, entitlementmanagementaccesspackage.DefaultCreateEntitlementManagementAccessPackageOperationOptions())
+	model, err := createAccessPackage(ctx, client, properties)
 	if err != nil {
 		return tf.ErrorDiagF(err, "Creating access package")
 	}
 
-	if resp.Model == nil {
+	if model == nil {
 		return tf.ErrorDiagF(errors.New("model was nil"), "Creating access package")
 	}
 
-	id := beta.NewIdentityGovernanceEntitlementManagementAccessPackageID(pointer.From(resp.Model.Id))
+	id := beta.NewIdentityGovernanceEntitlementManagementAccessPackageID(pointer.From(model.Id))
 	d.SetId(id.AccessPackageId)
 
 	return accessPackageResourceRead(ctx, d, meta)
