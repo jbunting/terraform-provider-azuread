@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-azure-helpers/lang/pointer"
@@ -42,7 +43,7 @@ func accessPackageResourceCatalogAssociationResource() *pluginsdk.Resource {
 
 		Schema: map[string]*pluginsdk.Schema{
 			"resource_origin_id": {
-				Description:  "The unique identifier of the resource in the origin system. In the case of an Azure AD group, this is the identifier of the group.",
+				Description:  "The unique identifier of the resource in the origin system. In the case of an Azure AD group, this is the object ID of the group. In the case of an Azure AD application, this is the object ID of its service principal, not the application object ID or client ID.",
 				Type:         pluginsdk.TypeString,
 				Required:     true,
 				ForceNew:     true,
@@ -96,7 +97,7 @@ func accessPackageResourceCatalogAssociationResourceCreate(ctx context.Context, 
 		return tf.ErrorDiagF(err, "Checking for existing Access Package Resource Catalog Association")
 	}
 	if existingResp.Model != nil && len(*existingResp.Model) > 0 {
-		importId := parse.NewAccessPackageResourceCatalogAssociationID(resourceOriginId, resourceOriginId)
+		importId := parse.NewAccessPackageResourceCatalogAssociationID(catalogId.AccessPackageCatalogId, resourceOriginId)
 		return tf.ImportAsExistsDiag("azuread_access_package_resource_catalog_association", importId.ID())
 	}
 
@@ -110,14 +111,30 @@ func accessPackageResourceCatalogAssociationResourceCreate(ctx context.Context, 
 		},
 	}
 
-	if _, err = client.CreateEntitlementManagementAccessPackageResourceRequest(ctx, properties, entitlementmanagementaccesspackageresourcerequest.DefaultCreateEntitlementManagementAccessPackageResourceRequestOperationOptions()); err != nil {
+	requestResp, err := client.CreateEntitlementManagementAccessPackageResourceRequest(ctx, properties, entitlementmanagementaccesspackageresourcerequest.DefaultCreateEntitlementManagementAccessPackageResourceRequestOperationOptions())
+	if err != nil {
 		return tf.ErrorDiagF(err, "Failed to request Access Package Resource Catalog Association (Catalog ID: %q / Origin ID: %q)", catalogId, resourceOriginId)
 	}
 
-	// Poll for processed request
+	var requestId *beta.IdentityGovernanceEntitlementManagementAccessPackageResourceRequestId
+	if requestResp.Model != nil && requestResp.Model.Id != nil {
+		requestId = pointer.To(beta.NewIdentityGovernanceEntitlementManagementAccessPackageResourceRequestID(*requestResp.Model.Id))
+	}
+
+	// Poll for processed request. The resource request is processed asynchronously, so poll the catalog until the
+	// resource appears, and stop early if the request itself reports that delivery failed.
 	if err = consistency.WaitForUpdate(ctx, func(ctx context.Context) (*bool, error) {
+		if requestId != nil {
+			reqResp, err := client.GetEntitlementManagementAccessPackageResourceRequest(ctx, *requestId, entitlementmanagementaccesspackageresourcerequest.DefaultGetEntitlementManagementAccessPackageResourceRequestOperationOptions())
+			if err == nil && reqResp.Model != nil {
+				if state := reqResp.Model.RequestState.GetOrZero(); strings.EqualFold(state, "DeliveryFailed") || strings.EqualFold(state, "Denied") || strings.EqualFold(state, "Canceled") {
+					return nil, fmt.Errorf("access package resource request %q is in state %q: %s", *requestResp.Model.Id, state, reqResp.Model.RequestStatus.GetOrZero())
+				}
+			}
+		}
+
 		options := entitlementmanagementaccesspackagecatalogaccesspackageresource.ListEntitlementManagementAccessPackageCatalogResourcesOperationOptions{
-			Filter: pointer.To(fmt.Sprintf("startswith(originId, '%s')", resourceOriginId)),
+			Filter: pointer.To(fmt.Sprintf("originId eq '%s'", resourceOriginId)),
 		}
 		resp, err := resourceClient.ListEntitlementManagementAccessPackageCatalogResources(ctx, catalogId, options)
 		if err != nil {
