@@ -36,6 +36,22 @@ func TestAccAccessPackageResourcePackageAssociation_complete(t *testing.T) {
 	})
 }
 
+func TestAccAccessPackageResourcePackageAssociation_appRole(t *testing.T) {
+	data := acceptance.BuildTestData(t, "azuread_access_package_resource_package_association", "test")
+	r := AccessPackageResourcePackageAssociationResource{}
+
+	data.ResourceTest(t, r, []acceptance.TestStep{
+		{
+			Config: r.appRole(data),
+			Check: acceptance.ComposeTestCheckFunc(
+				check.That(data.ResourceName).ExistsInAzure(r),
+				check.That(data.ResourceName).Key("resource_role_origin_id").HasValue("00000000-0000-0000-0000-000000000001"),
+			),
+		},
+		data.ImportStep(),
+	})
+}
+
 func (AccessPackageResourcePackageAssociationResource) Exists(ctx context.Context, clients *clients.Client, state *terraform.InstanceState) (*bool, error) {
 	client := clients.IdentityGovernance.AccessPackageClient
 
@@ -83,6 +99,51 @@ resource "azuread_access_package" "test" {
 resource "azuread_access_package_resource_package_association" "test" {
   access_package_id               = azuread_access_package.test.id
   catalog_resource_association_id = azuread_access_package_resource_catalog_association.test.id
+}
+`, data.RandomInteger)
+}
+
+func (AccessPackageResourcePackageAssociationResource) appRole(data acceptance.TestData) string {
+	return fmt.Sprintf(`
+provider "azuread" {}
+
+resource "azuread_application" "test" {
+  display_name = "acctest-access-package-app-role-%[1]d"
+
+  app_role {
+    allowed_member_types = ["User"]
+    description          = "Readers"
+    display_name         = "Reader"
+    id                   = "00000000-0000-0000-0000-000000000001"
+    value                = "read"
+  }
+}
+
+resource "azuread_service_principal" "test" {
+  client_id = azuread_application.test.client_id
+}
+
+resource "azuread_access_package_catalog" "test_catalog" {
+  display_name = "acctest-catalog-%[1]d"
+  description  = "Test catalog %[1]d"
+}
+
+resource "azuread_access_package_resource_catalog_association" "test" {
+  catalog_id             = azuread_access_package_catalog.test_catalog.id
+  resource_origin_id     = azuread_service_principal.test.object_id
+  resource_origin_system = "AadApplication"
+}
+
+resource "azuread_access_package" "test" {
+  display_name = "acctest-package-%[1]d"
+  description  = "Test Package %[1]d"
+  catalog_id   = azuread_access_package_catalog.test_catalog.id
+}
+
+resource "azuread_access_package_resource_package_association" "test" {
+  access_package_id               = azuread_access_package.test.id
+  catalog_resource_association_id = azuread_access_package_resource_catalog_association.test.id
+  resource_role_origin_id         = "00000000-0000-0000-0000-000000000001"
 }
 `, data.RandomInteger)
 }

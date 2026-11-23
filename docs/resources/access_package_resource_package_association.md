@@ -45,11 +45,44 @@ resource "azuread_access_package_resource_package_association" "example" {
 }
 ```
 
+### Application role
+
+```terraform
+resource "azuread_application" "example" {
+  display_name = "example-app"
+
+  app_role {
+    allowed_member_types = ["User"]
+    description          = "Can read the example data"
+    display_name         = "Reader"
+    id                   = "00000000-0000-0000-0000-000000000001"
+    value                = "read"
+  }
+}
+
+resource "azuread_service_principal" "example" {
+  client_id = azuread_application.example.client_id
+}
+
+resource "azuread_access_package_resource_catalog_association" "example_app" {
+  catalog_id             = azuread_access_package_catalog.example.id
+  resource_origin_id     = azuread_service_principal.example.object_id
+  resource_origin_system = "AadApplication"
+}
+
+resource "azuread_access_package_resource_package_association" "example_app_reader" {
+  access_package_id               = azuread_access_package.example.id
+  catalog_resource_association_id = azuread_access_package_resource_catalog_association.example_app.id
+  resource_role_origin_id         = azuread_application.example.app_role_ids["read"]
+}
+```
+
 ## Argument Reference
 
 * `access_package_id` - (Required) The ID of access package this resource association is configured to. Changing this forces a new resource to be created.
-* `access_type` - (Optional) The role of access type to the specified resource. Valid values are `Member`, or `Owner` The default is `Member`. Changing this forces a new resource to be created.
+* `access_type` - (Optional) The role of access type to the specified resource. Valid values are `Member`, or `Owner` The default is `Member`. Ignored when `resource_role_origin_id` is set. Changing this forces a new resource to be created.
 * `catalog_resource_association_id` - (Required) The ID of the catalog association from the `azuread_access_package_resource_catalog_association` resource. Changing this forces a new resource to be created.
+* `resource_role_origin_id` - (Optional) The origin ID of the resource role to assign, such as the ID of one of an application's app roles, or `00000000-0000-0000-0000-000000000000` for an application's default access. When unset, the role is derived from `access_type`. Changing this forces a new resource to be created.
 
 ## Attributes Reference
 

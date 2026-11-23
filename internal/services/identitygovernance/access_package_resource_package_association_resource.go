@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-azure-helpers/lang/pointer"
@@ -16,6 +17,7 @@ import (
 	"github.com/hashicorp/go-azure-sdk/microsoft-graph/identitygovernance/beta/entitlementmanagementaccesspackageaccesspackageresourcerolescope"
 	"github.com/hashicorp/go-azure-sdk/microsoft-graph/identitygovernance/beta/entitlementmanagementaccesspackagecatalogaccesspackageresource"
 	"github.com/hashicorp/go-azure-sdk/sdk/nullable"
+	"github.com/hashicorp/go-azure-sdk/sdk/odata"
 	"github.com/hashicorp/terraform-provider-azuread/internal/clients"
 	"github.com/hashicorp/terraform-provider-azuread/internal/helpers/consistency"
 	"github.com/hashicorp/terraform-provider-azuread/internal/helpers/tf"
@@ -68,6 +70,15 @@ func accessPackageResourcePackageAssociationResource() *pluginsdk.Resource {
 					"Owner",
 				}, false),
 			},
+
+			"resource_role_origin_id": {
+				Description:  "The origin ID of the resource role to assign, such as the ID of one of an application's app roles, or `00000000-0000-0000-0000-000000000000` for an application's default access. When unset, the role is derived from `access_type`.",
+				Type:         pluginsdk.TypeString,
+				Optional:     true,
+				Computed:     true,
+				ForceNew:     true,
+				ValidateFunc: validation.StringIsNotEmpty,
+			},
 		},
 	}
 }
@@ -86,8 +97,13 @@ func accessPackageResourcePackageAssociationResourceCreate(ctx context.Context, 
 	accessPackageId := beta.NewIdentityGovernanceEntitlementManagementAccessPackageID(d.Get("access_package_id").(string))
 
 	catalogId := beta.NewIdentityGovernanceEntitlementManagementAccessPackageCatalogID(catalogResourceAssociationId.CatalogId)
+	roleOriginId, roleOriginIdSet := d.GetOk("resource_role_origin_id")
+
 	options := entitlementmanagementaccesspackagecatalogaccesspackageresource.ListEntitlementManagementAccessPackageCatalogResourcesOperationOptions{
 		Filter: pointer.To(fmt.Sprintf("originId eq '%s'", catalogResourceAssociationId.OriginId)),
+	}
+	if roleOriginIdSet {
+		options.Expand = &odata.Expand{Relationship: "accessPackageResourceRoles"}
 	}
 	resourceResp, err := resourceClient.ListEntitlementManagementAccessPackageCatalogResources(ctx, catalogId, options)
 	if err != nil {
@@ -100,17 +116,29 @@ func accessPackageResourcePackageAssociationResourceCreate(ctx context.Context, 
 
 	resource := pointer.To((*resourceResp.Model)[0])
 
+	role := &beta.AccessPackageResourceRole{
+		DisplayName:  nullable.NoZero(accessType),
+		OriginId:     nullable.Value(fmt.Sprintf("%s_%s", accessType, catalogResourceAssociationId.OriginId)),
+		OriginSystem: resource.OriginSystem,
+	}
+
+	// Roles such as an application's app roles are not derived from the access type: take the role the
+	// catalog lists for the resource with the requested origin ID.
+	if roleOriginIdSet {
+		role, err = findAccessPackageResourceRole(resource, roleOriginId.(string))
+		if err != nil {
+			return tf.ErrorDiagPathF(err, "resource_role_origin_id", "Retrieving resource roles for %q in %s", catalogResourceAssociationId.OriginId, catalogId)
+		}
+	}
+
+	role.AccessPackageResource = &beta.AccessPackageResource{
+		Id:           resource.Id,
+		ResourceType: resource.ResourceType,
+		OriginId:     resource.OriginId,
+	}
+
 	properties := beta.AccessPackageResourceRoleScope{
-		AccessPackageResourceRole: &beta.AccessPackageResourceRole{
-			DisplayName:  nullable.NoZero(accessType),
-			OriginId:     nullable.Value(fmt.Sprintf("%s_%s", accessType, catalogResourceAssociationId.OriginId)),
-			OriginSystem: resource.OriginSystem,
-			AccessPackageResource: &beta.AccessPackageResource{
-				Id:           resource.Id,
-				ResourceType: resource.ResourceType,
-				OriginId:     resource.OriginId,
-			},
-		},
+		AccessPackageResourceRole: role,
 		AccessPackageResourceScope: &beta.AccessPackageResourceScope{
 			OriginSystem: resource.OriginSystem,
 			OriginId:     nullable.Value(catalogResourceAssociationId.OriginId),
@@ -190,6 +218,10 @@ func accessPackageResourcePackageAssociationResourceRead(ctx context.Context, d 
 	tf.Set(d, "access_type", resourceId.AccessType)
 	tf.Set(d, "catalog_resource_association_id", catalogResourceAssociationId.ID())
 
+	if roleScope.AccessPackageResourceRole != nil {
+		tf.Set(d, "resource_role_origin_id", roleScope.AccessPackageResourceRole.OriginId.GetOrZero())
+	}
+
 	return nil
 }
 
@@ -208,4 +240,25 @@ func accessPackageResourcePackageAssociationResourceDelete(ctx context.Context, 
 	}
 
 	return nil
+}
+
+func findAccessPackageResourceRole(resource *beta.AccessPackageResource, originId string) (*beta.AccessPackageResourceRole, error) {
+	if resource.AccessPackageResourceRoles == nil {
+		return nil, errors.New("the catalog returned no resource roles")
+	}
+
+	available := make([]string, 0, len(*resource.AccessPackageResourceRoles))
+	for _, r := range *resource.AccessPackageResourceRoles {
+		if r.OriginId.GetOrZero() == originId {
+			return &beta.AccessPackageResourceRole{
+				Id:           r.Id,
+				DisplayName:  r.DisplayName,
+				OriginId:     r.OriginId,
+				OriginSystem: r.OriginSystem,
+			}, nil
+		}
+		available = append(available, fmt.Sprintf("%q (%s)", r.OriginId.GetOrZero(), r.DisplayName.GetOrZero()))
+	}
+
+	return nil, fmt.Errorf("no resource role with origin ID %q; available: %s", originId, strings.Join(available, ", "))
 }
